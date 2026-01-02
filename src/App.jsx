@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { supabase } from './supabase';
 
 const EXERCISES = ['pushups', 'squats', 'pullups'];
 const TARGET = 10000;
@@ -26,12 +27,38 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState(formatDate(new Date()));
   const [loading, setLoading] = useState(true);
   const [customAmount, setCustomAmount] = useState({ pushups: '', squats: '', pullups: '' });
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
+  // Check auth state on mount
   useEffect(() => {
-    loadData();
+    if (!supabase) {
+      setAuthLoading(false);
+      loadLocalData();
+      return;
+    }
+
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      setAuthLoading(false);
+      if (session?.user) {
+        loadCloudData(session.user.id);
+      } else {
+        loadLocalData();
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        loadCloudData(session.user.id);
+      }
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
-  function loadData() {
+  function loadLocalData() {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
@@ -43,12 +70,54 @@ export default function App() {
     setLoading(false);
   }
 
-  function saveData(newData) {
-    setData(newData);
+  async function loadCloudData(userId) {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(newData));
+      const { data: logs, error } = await supabase
+        .from('logs')
+        .select('date, pushups, squats, pullups')
+        .eq('user_id', userId);
+
+      if (error) throw error;
+
+      const logsObj = {};
+      logs.forEach(log => {
+        logsObj[log.date] = {
+          pushups: log.pushups,
+          squats: log.squats,
+          pullups: log.pullups
+        };
+      });
+
+      setData({ logs: logsObj });
+      // Also cache locally
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ logs: logsObj }));
     } catch (e) {
-      console.error('Failed to save:', e);
+      console.error('Failed to load cloud data:', e);
+      loadLocalData();
+    }
+    setLoading(false);
+  }
+
+  async function saveData(newData) {
+    setData(newData);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(newData));
+
+    if (supabase && user) {
+      const dayData = newData.logs[selectedDate];
+      if (dayData) {
+        try {
+          await supabase.from('logs').upsert({
+            user_id: user.id,
+            date: selectedDate,
+            pushups: dayData.pushups || 0,
+            squats: dayData.squats || 0,
+            pullups: dayData.pullups || 0,
+            updated_at: new Date().toISOString()
+          }, { onConflict: 'user_id,date' });
+        } catch (e) {
+          console.error('Failed to sync:', e);
+        }
+      }
     }
   }
 
@@ -101,10 +170,46 @@ export default function App() {
     return data.logs?.[selectedDate] || { pushups: 0, squats: 0, pullups: 0 };
   }
 
-  if (loading) {
+  async function signInWithGitHub() {
+    await supabase.auth.signInWithOAuth({
+      provider: 'github',
+      options: {
+        redirectTo: window.location.origin
+      }
+    });
+  }
+
+  async function signOut() {
+    await supabase.auth.signOut();
+    setUser(null);
+  }
+
+  if (authLoading || loading) {
     return (
       <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center">
         <p>Loading...</p>
+      </div>
+    );
+  }
+
+  // Show sign in screen if not authenticated and supabase is configured
+  if (supabase && !user) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center p-4">
+        <div className="text-center">
+          <h1 className="text-3xl font-bold mb-2">Misogi 2026</h1>
+          <p className="text-zinc-500 mb-8">10,000 push-ups · 10,000 squats · 10,000 pull-ups</p>
+          <button
+            onClick={signInWithGitHub}
+            className="bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 px-6 py-3 rounded-xl font-medium transition-colors flex items-center gap-2 mx-auto"
+          >
+            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+              <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z" />
+            </svg>
+            Sign in with GitHub
+          </button>
+          <p className="text-zinc-600 text-sm mt-6">Your progress syncs to the cloud</p>
+        </div>
       </div>
     );
   }
@@ -127,11 +232,19 @@ export default function App() {
         <div className="text-center mb-6">
           <h1 className="text-2xl font-bold">Misogi 2026</h1>
           <p className="text-zinc-500 text-sm">10,000 each · 30,000 total</p>
+          {user && (
+            <button
+              onClick={signOut}
+              className="text-xs text-zinc-600 hover:text-zinc-400 mt-1"
+            >
+              Sign out
+            </button>
+          )}
         </div>
 
         {/* Date Selector */}
         <div className="flex items-center justify-center gap-2 mb-6">
-          <button 
+          <button
             onClick={() => {
               const d = new Date(selectedDate);
               d.setDate(d.getDate() - 1);
@@ -147,7 +260,7 @@ export default function App() {
             </div>
             <div className="text-xs text-zinc-500">Day {getDayOfYear(new Date(selectedDate))}</div>
           </div>
-          <button 
+          <button
             onClick={() => {
               const d = new Date(selectedDate);
               d.setDate(d.getDate() + 1);
@@ -165,7 +278,7 @@ export default function App() {
           const dayCount = dayTotals[exercise] || 0;
           const yearCount = yearTotals[exercise] || 0;
           const pct = ((yearCount / TARGET) * 100).toFixed(1);
-          
+
           return (
             <div key={exercise} className="bg-zinc-900 rounded-2xl p-4 mb-4">
               <div className="flex justify-between items-center mb-3">
@@ -210,7 +323,7 @@ export default function App() {
 
               {/* Progress Bar */}
               <div className="h-2 bg-zinc-800 rounded-full overflow-hidden mb-2">
-                <div 
+                <div
                   className={`h-full ${config.color} transition-all duration-300`}
                   style={{ width: `${Math.min(100, (yearCount / TARGET) * 100)}%` }}
                 />
