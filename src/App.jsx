@@ -29,6 +29,8 @@ export default function App() {
   const [customAmount, setCustomAmount] = useState({ pushups: '', squats: '', pullups: '' });
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [syncStatus, setSyncStatus] = useState('idle'); // 'idle' | 'syncing' | 'synced' | 'error'
+  const [lastSyncTime, setLastSyncTime] = useState(null);
 
   // Check auth state on mount
   useEffect(() => {
@@ -70,7 +72,8 @@ export default function App() {
     setLoading(false);
   }
 
-  async function loadCloudData(userId) {
+  async function loadCloudData(userId, showSyncStatus = true) {
+    if (showSyncStatus) setSyncStatus('syncing');
     try {
       const { data: logs, error } = await supabase
         .from('logs')
@@ -91,12 +94,46 @@ export default function App() {
       setData({ logs: logsObj });
       // Also cache locally
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ logs: logsObj }));
+      setSyncStatus('synced');
+      setLastSyncTime(new Date());
     } catch (e) {
       console.error('Failed to load cloud data:', e);
+      setSyncStatus('error');
       loadLocalData();
     }
     setLoading(false);
   }
+
+  // Manual refresh function
+  async function refreshData() {
+    if (user) {
+      await loadCloudData(user.id);
+    }
+  }
+
+  // Auto-refresh: poll for updates every 30 seconds when tab is visible
+  useEffect(() => {
+    if (!supabase || !user) return;
+
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        loadCloudData(user.id, false); // Silent refresh
+      }
+    }, 30000);
+
+    // Also refresh when tab becomes visible
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && user) {
+        loadCloudData(user.id);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [user]);
 
   async function saveData(newData) {
     setData(newData);
@@ -105,8 +142,9 @@ export default function App() {
     if (supabase && user) {
       const dayData = newData.logs[selectedDate];
       if (dayData) {
+        setSyncStatus('syncing');
         try {
-          await supabase.from('logs').upsert({
+          const { error } = await supabase.from('logs').upsert({
             user_id: user.id,
             date: selectedDate,
             pushups: dayData.pushups || 0,
@@ -114,8 +152,13 @@ export default function App() {
             pullups: dayData.pullups || 0,
             updated_at: new Date().toISOString()
           }, { onConflict: 'user_id,date' });
+
+          if (error) throw error;
+          setSyncStatus('synced');
+          setLastSyncTime(new Date());
         } catch (e) {
           console.error('Failed to sync:', e);
+          setSyncStatus('error');
         }
       }
     }
@@ -233,12 +276,47 @@ export default function App() {
           <h1 className="text-2xl font-bold">Misogi 2026</h1>
           <p className="text-zinc-500 text-sm">10,000 each · 30,000 total</p>
           {user && (
-            <button
-              onClick={signOut}
-              className="text-xs text-zinc-600 hover:text-zinc-400 mt-1"
-            >
-              Sign out
-            </button>
+            <div className="flex items-center justify-center gap-3 mt-2">
+              {/* Sync Status Indicator */}
+              <button
+                onClick={refreshData}
+                className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded-full transition-colors ${
+                  syncStatus === 'syncing' ? 'bg-yellow-500/20 text-yellow-400' :
+                  syncStatus === 'synced' ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30' :
+                  syncStatus === 'error' ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' :
+                  'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                }`}
+                disabled={syncStatus === 'syncing'}
+              >
+                {syncStatus === 'syncing' ? (
+                  <>
+                    <span className="animate-spin">↻</span>
+                    Syncing...
+                  </>
+                ) : syncStatus === 'synced' ? (
+                  <>
+                    <span>✓</span>
+                    Synced
+                  </>
+                ) : syncStatus === 'error' ? (
+                  <>
+                    <span>!</span>
+                    Sync failed - tap to retry
+                  </>
+                ) : (
+                  <>
+                    <span>↻</span>
+                    Refresh
+                  </>
+                )}
+              </button>
+              <button
+                onClick={signOut}
+                className="text-xs text-zinc-600 hover:text-zinc-400"
+              >
+                Sign out
+              </button>
+            </div>
           )}
         </div>
 
